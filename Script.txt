@@ -1,0 +1,1384 @@
+------------------------------------------------
+-- SERVICES
+-- Roblox services used by the menu.
+------------------------------------------------
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+
+local player = Players.LocalPlayer
+
+------------------------------------------------
+-- SETTINGS
+-- Change these values if you want different defaults.
+------------------------------------------------
+local DEFAULT_MAX_SPEED_BONUS = 500
+local MAX_SPEED_BONUS = DEFAULT_MAX_SPEED_BONUS
+local MAX_ALLOWED_SPEED = 100000
+local FLY_MIN_SPEED = 1
+local DEFAULT_ESP_RANGE = 1000
+local DEFAULT_ESP_COLOR = Color3.fromRGB(255, 80, 80)
+
+------------------------------------------------
+-- STATE
+-- These variables remember what the menu is doing.
+------------------------------------------------
+local enabled = false
+-- This is captured from the game's Humanoid instead of assuming Roblox's 16.
+-- The fallback is only used by the menu before a character exists; it is never
+-- written to the Humanoid while custom speed is off.
+local baseSpeed = 16
+local speed = baseSpeed
+local hasCustomSpeed = false
+local flySpeed = 20
+local minimized = false
+local dragging = false
+local draggingMax = false
+local draggingFly = false
+local draggingUI = false
+local bindingAction = nil
+local teamCheckEnabled = false
+local espRange = DEFAULT_ESP_RANGE
+local espColor = DEFAULT_ESP_COLOR
+
+local flying = false
+local espEnabled = false
+local flyConn
+local flyWatchConn
+local vel
+local gyro
+
+local speedConn
+local walkSpeedConn
+local charConn
+local updateSpeedSlider
+local setMaxSpeedValue
+local espConnections = {}
+local espHighlights = {}
+
+local keybinds = {
+    Speed = Enum.KeyCode.T,
+    Fly = Enum.KeyCode.F,
+    ESP = Enum.KeyCode.G
+}
+
+local currentTab = "Main"
+
+------------------------------------------------
+-- CHARACTER HELPERS
+-- Small helper functions for finding and updating the player.
+------------------------------------------------
+local function getHumanoid()
+    local char = player.Character
+    if not char then return nil end
+
+    return char:FindFirstChildOfClass("Humanoid")
+end
+
+local function applySpeed()
+    local hum = getHumanoid()
+    if not hum then return end
+
+    -- When custom speed is off, leave WalkSpeed entirely under the game's control.
+    if enabled and hum.WalkSpeed ~= speed then
+        local targetSpeed = speed
+        hum.WalkSpeed = targetSpeed
+    end
+end
+
+------------------------------------------------
+-- SPEED WATCHDOG
+-- Keeps speed applied if another local script changes WalkSpeed.
+------------------------------------------------
+local function watchHumanoid(hum)
+    if walkSpeedConn then
+        walkSpeedConn:Disconnect()
+        walkSpeedConn = nil
+    end
+
+    if not hum then return end
+
+    walkSpeedConn = hum:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+        if enabled then
+            task.defer(applySpeed)
+        else
+            -- Keep the slider's minimum aligned with the speed selected by the game.
+            baseSpeed = hum.WalkSpeed
+            if not hasCustomSpeed then
+                speed = baseSpeed
+            end
+            task.defer(function()
+                setMaxSpeedValue(baseSpeed + MAX_SPEED_BONUS)
+                updateSpeedSlider()
+            end)
+        end
+    end)
+
+    if not enabled then
+        baseSpeed = hum.WalkSpeed
+        if not hasCustomSpeed then
+            speed = baseSpeed
+        end
+    end
+
+    applySpeed()
+end
+
+local function startSpeedWatchdog()
+    if speedConn then
+        speedConn:Disconnect()
+    end
+
+    speedConn = RunService.Heartbeat:Connect(function()
+        applySpeed()
+    end)
+
+    if charConn then
+        charConn:Disconnect()
+    end
+
+    charConn = player.CharacterAdded:Connect(function(char)
+        local hum = char:WaitForChild("Humanoid", 5)
+        watchHumanoid(hum)
+    end)
+
+    if player.Character then
+        watchHumanoid(player.Character:FindFirstChildOfClass("Humanoid"))
+    end
+end
+
+------------------------------------------------
+-- GUI ROOT
+-- Main ScreenGui and menu window.
+------------------------------------------------
+local gui = Instance.new("ScreenGui")
+gui.Name = "SpeedMenu"
+gui.ResetOnSpawn = false
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, 380, 0, 390)
+main.Position = UDim2.new(0.5, -190, 0.5, -130)
+main.BackgroundColor3 = Color3.fromRGB(16, 18, 24)
+main.ClipsDescendants = true
+main.Parent = gui
+
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Color3.fromRGB(85, 90, 115)
+mainStroke.Transparency = 0.35
+mainStroke.Thickness = 1
+mainStroke.Parent = main
+
+------------------------------------------------
+-- TOP BAR
+-- Title area, close button, minimize button, and drag handle.
+------------------------------------------------
+local top = Instance.new("Frame")
+top.Size = UDim2.new(1, 0, 0, 46)
+top.BackgroundColor3 = Color3.fromRGB(25, 28, 36)
+top.Parent = main
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -140, 1, 0)
+title.Position = UDim2.new(0, 14, 0, 0)
+title.Text = "MOVEMENT MENU"
+title.TextSize = 18
+title.Font = Enum.Font.GothamBold
+title.TextColor3 = Color3.new(1, 1, 1)
+title.BackgroundTransparency = 1
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = top
+
+local topDivider = Instance.new("Frame")
+topDivider.Size = UDim2.new(1, 0, 0, 1)
+topDivider.Position = UDim2.new(0, 0, 1, -1)
+topDivider.BackgroundColor3 = Color3.fromRGB(60, 64, 84)
+topDivider.BorderSizePixel = 0
+topDivider.Parent = top
+
+------------------------------------------------
+-- SCROLL AREA
+-- Put menu controls in here so the menu can scroll.
+------------------------------------------------
+local tabBar = Instance.new("Frame")
+tabBar.Name = "TabBar"
+tabBar.Size = UDim2.new(1, 0, 0, 44)
+tabBar.Position = UDim2.new(0, 0, 0, 46)
+tabBar.BackgroundColor3 = Color3.fromRGB(20, 23, 30)
+tabBar.BorderSizePixel = 0
+tabBar.Parent = main
+
+local mainTabBtn = Instance.new("TextButton")
+mainTabBtn.Size = UDim2.new(0.5, -18, 0, 30)
+mainTabBtn.Position = UDim2.new(0, 14, 0, 7)
+mainTabBtn.Text = "Main"
+mainTabBtn.TextSize = 15
+mainTabBtn.Font = Enum.Font.GothamBold
+mainTabBtn.TextColor3 = Color3.new(1, 1, 1)
+mainTabBtn.Parent = tabBar
+
+local settingsTabBtn = Instance.new("TextButton")
+settingsTabBtn.Size = UDim2.new(0.5, -18, 0, 30)
+settingsTabBtn.Position = UDim2.new(0.5, 4, 0, 7)
+settingsTabBtn.Text = "Settings"
+settingsTabBtn.TextSize = 15
+settingsTabBtn.Font = Enum.Font.GothamBold
+settingsTabBtn.TextColor3 = Color3.new(1, 1, 1)
+settingsTabBtn.Parent = tabBar
+
+local content = Instance.new("ScrollingFrame")
+content.Name = "Content"
+content.Size = UDim2.new(1, 0, 1, -90)
+content.Position = UDim2.new(0, 0, 0, 90)
+content.BackgroundTransparency = 1
+content.BorderSizePixel = 0
+content.CanvasSize = UDim2.new(0, 0, 0, 340)
+content.Active = true
+content.ScrollingDirection = Enum.ScrollingDirection.Y
+content.ScrollBarThickness = 6
+content.ScrollBarImageColor3 = Color3.fromRGB(120, 120, 255)
+content.Parent = main
+
+local settingsContent = Instance.new("ScrollingFrame")
+settingsContent.Name = "SettingsContent"
+settingsContent.Size = UDim2.new(1, 0, 1, -90)
+settingsContent.Position = UDim2.new(0, 0, 0, 90)
+settingsContent.BackgroundTransparency = 1
+settingsContent.BorderSizePixel = 0
+settingsContent.CanvasSize = UDim2.new(0, 0, 0, 560)
+settingsContent.Active = true
+settingsContent.ScrollingDirection = Enum.ScrollingDirection.Y
+settingsContent.ScrollBarThickness = 6
+settingsContent.ScrollBarImageColor3 = Color3.fromRGB(120, 120, 255)
+settingsContent.Visible = false
+settingsContent.Parent = main
+
+local contentPadding = Instance.new("UIPadding")
+contentPadding.PaddingTop = UDim.new(0, 18)
+contentPadding.PaddingBottom = UDim.new(0, 20)
+contentPadding.PaddingLeft = UDim.new(0, 14)
+contentPadding.PaddingRight = UDim.new(0, 14)
+contentPadding.Parent = content
+
+local settingsPadding = Instance.new("UIPadding")
+settingsPadding.PaddingTop = UDim.new(0, 18)
+settingsPadding.PaddingBottom = UDim.new(0, 20)
+settingsPadding.PaddingLeft = UDim.new(0, 14)
+settingsPadding.PaddingRight = UDim.new(0, 14)
+settingsPadding.Parent = settingsContent
+
+local function styleButton(button)
+    button.AutoButtonColor = false
+    button.BackgroundColor3 = Color3.fromRGB(35, 38, 50)
+
+    Instance.new("UICorner", button).CornerRadius = UDim.new(0, 9)
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(80, 86, 110)
+    stroke.Transparency = 0.45
+    stroke.Thickness = 1
+    stroke.Parent = button
+
+    button.MouseEnter:Connect(function()
+        button.BackgroundColor3 = Color3.fromRGB(46, 50, 66)
+    end)
+
+    button.MouseLeave:Connect(function()
+        button.BackgroundColor3 = Color3.fromRGB(35, 38, 50)
+    end)
+end
+
+------------------------------------------------
+-- SPEED TOGGLE BUTTON
+-- Turns custom walk speed on and off.
+------------------------------------------------
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.new(1, -20, 0, 45)
+toggleBtn.Position = UDim2.new(0, 0, 0, 0)
+toggleBtn.Text = "Speed: OFF"
+toggleBtn.TextSize = 18
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextColor3 = Color3.new(1, 1, 1)
+toggleBtn.Parent = content
+
+styleButton(toggleBtn)
+
+------------------------------------------------
+-- FLY BUTTON
+-- Turns fly mode on and off.
+------------------------------------------------
+local flyBtn = Instance.new("TextButton")
+flyBtn.Size = UDim2.new(1, -20, 0, 45)
+flyBtn.Position = UDim2.new(0, 0, 0, 60)
+flyBtn.Text = "Fly: OFF"
+flyBtn.TextSize = 18
+flyBtn.Font = Enum.Font.GothamBold
+flyBtn.TextColor3 = Color3.new(1, 1, 1)
+flyBtn.Parent = content
+
+styleButton(flyBtn)
+
+------------------------------------------------
+-- ESP BUTTON
+-- Shows other players through walls with outlines.
+------------------------------------------------
+local espBtn = Instance.new("TextButton")
+espBtn.Size = UDim2.new(1, -20, 0, 45)
+espBtn.Position = UDim2.new(0, 0, 0, 120)
+espBtn.Text = "ESP: OFF"
+espBtn.TextSize = 18
+espBtn.Font = Enum.Font.GothamBold
+espBtn.TextColor3 = Color3.new(1, 1, 1)
+espBtn.Parent = content
+
+styleButton(espBtn)
+
+------------------------------------------------
+-- SPEED LABEL
+-- Shows the currently selected speed value.
+------------------------------------------------
+local label = Instance.new("TextLabel")
+label.Size = UDim2.new(1, -20, 0, 25)
+label.Position = UDim2.new(0, 0, 0, 185)
+label.Text = "Speed: " .. speed
+label.TextSize = 18
+label.Font = Enum.Font.GothamBold
+label.TextColor3 = Color3.new(1, 1, 1)
+label.BackgroundTransparency = 1
+label.TextXAlignment = Enum.TextXAlignment.Left
+label.Parent = content
+
+------------------------------------------------
+-- SPEED SLIDER
+-- Drag this bar to choose the custom speed.
+------------------------------------------------
+local bar = Instance.new("Frame")
+bar.Size = UDim2.new(1, -20, 0, 12)
+bar.Position = UDim2.new(0, 0, 0, 220)
+bar.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+bar.Parent = content
+
+Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
+
+local barStroke = Instance.new("UIStroke")
+barStroke.Color = Color3.fromRGB(95, 100, 130)
+barStroke.Transparency = 0.4
+barStroke.Thickness = 1
+barStroke.Parent = bar
+
+local fill = Instance.new("Frame")
+fill.Size = UDim2.new(0, 0, 1, 0)
+fill.BackgroundColor3 = Color3.fromRGB(120, 120, 255)
+fill.Parent = bar
+
+Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+------------------------------------------------
+-- FLY SPEED SLIDER
+-- This is separate from walking speed.
+------------------------------------------------
+local flySpeedLabel = Instance.new("TextLabel")
+flySpeedLabel.Size = UDim2.new(1, -20, 0, 25)
+flySpeedLabel.Position = UDim2.new(0, 0, 0, 255)
+flySpeedLabel.Text = "Fly Speed: " .. flySpeed
+flySpeedLabel.TextSize = 18
+flySpeedLabel.Font = Enum.Font.GothamBold
+flySpeedLabel.TextColor3 = Color3.new(1, 1, 1)
+flySpeedLabel.BackgroundTransparency = 1
+flySpeedLabel.TextXAlignment = Enum.TextXAlignment.Left
+flySpeedLabel.Parent = content
+
+local flyBar = Instance.new("Frame")
+flyBar.Size = UDim2.new(1, -20, 0, 12)
+flyBar.Position = UDim2.new(0, 0, 0, 290)
+flyBar.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+flyBar.Parent = content
+
+Instance.new("UICorner", flyBar).CornerRadius = UDim.new(1, 0)
+
+local flyBarStroke = Instance.new("UIStroke")
+flyBarStroke.Color = Color3.fromRGB(95, 100, 130)
+flyBarStroke.Transparency = 0.4
+flyBarStroke.Thickness = 1
+flyBarStroke.Parent = flyBar
+
+local flyFill = Instance.new("Frame")
+flyFill.Size = UDim2.new(0, 0, 1, 0)
+flyFill.BackgroundColor3 = Color3.fromRGB(120, 200, 255)
+flyFill.Parent = flyBar
+
+Instance.new("UICorner", flyFill).CornerRadius = UDim.new(1, 0)
+
+------------------------------------------------
+-- SETTINGS TAB OPTIONS
+-- Team check and max speed controls live here.
+------------------------------------------------
+local teamCheckBtn = Instance.new("TextButton")
+teamCheckBtn.Size = UDim2.new(1, -20, 0, 45)
+teamCheckBtn.Position = UDim2.new(0, 0, 0, 0)
+teamCheckBtn.Text = "Team Check: OFF"
+teamCheckBtn.TextSize = 18
+teamCheckBtn.Font = Enum.Font.GothamBold
+teamCheckBtn.TextColor3 = Color3.new(1, 1, 1)
+teamCheckBtn.Parent = settingsContent
+
+styleButton(teamCheckBtn)
+
+local maxSpeedLabel = Instance.new("TextLabel")
+maxSpeedLabel.Size = UDim2.new(1, -20, 0, 25)
+maxSpeedLabel.Position = UDim2.new(0, 0, 0, 65)
+maxSpeedLabel.Text = "Max Speed: " .. (baseSpeed + MAX_SPEED_BONUS)
+maxSpeedLabel.TextSize = 18
+maxSpeedLabel.Font = Enum.Font.GothamBold
+maxSpeedLabel.TextColor3 = Color3.new(1, 1, 1)
+maxSpeedLabel.BackgroundTransparency = 1
+maxSpeedLabel.TextXAlignment = Enum.TextXAlignment.Left
+maxSpeedLabel.Parent = settingsContent
+
+local maxSpeedBox = Instance.new("TextBox")
+maxSpeedBox.Size = UDim2.new(0, 120, 0, 32)
+maxSpeedBox.Position = UDim2.new(1, -140, 0, 60)
+maxSpeedBox.Text = tostring(baseSpeed + MAX_SPEED_BONUS)
+maxSpeedBox.PlaceholderText = "Max"
+maxSpeedBox.TextSize = 15
+maxSpeedBox.Font = Enum.Font.GothamBold
+maxSpeedBox.TextColor3 = Color3.new(1, 1, 1)
+maxSpeedBox.BackgroundColor3 = Color3.fromRGB(35, 38, 50)
+maxSpeedBox.ClearTextOnFocus = false
+maxSpeedBox.Parent = settingsContent
+
+Instance.new("UICorner", maxSpeedBox).CornerRadius = UDim.new(0, 8)
+
+local maxSpeedBoxStroke = Instance.new("UIStroke")
+maxSpeedBoxStroke.Color = Color3.fromRGB(80, 86, 110)
+maxSpeedBoxStroke.Transparency = 0.45
+maxSpeedBoxStroke.Thickness = 1
+maxSpeedBoxStroke.Parent = maxSpeedBox
+
+local maxBar = Instance.new("Frame")
+maxBar.Size = UDim2.new(1, -20, 0, 12)
+maxBar.Position = UDim2.new(0, 0, 0, 100)
+maxBar.BackgroundColor3 = Color3.fromRGB(60, 60, 80)
+maxBar.Parent = settingsContent
+
+Instance.new("UICorner", maxBar).CornerRadius = UDim.new(1, 0)
+
+local maxBarStroke = Instance.new("UIStroke")
+maxBarStroke.Color = Color3.fromRGB(95, 100, 130)
+maxBarStroke.Transparency = 0.4
+maxBarStroke.Thickness = 1
+maxBarStroke.Parent = maxBar
+
+local maxFill = Instance.new("Frame")
+maxFill.Size = UDim2.new(1, 0, 1, 0)
+maxFill.BackgroundColor3 = Color3.fromRGB(120, 120, 255)
+maxFill.Parent = maxBar
+
+Instance.new("UICorner", maxFill).CornerRadius = UDim.new(1, 0)
+
+------------------------------------------------
+-- KEYBIND BUTTONS
+-- Click one, then press a key. Backspace/Delete/Escape clears the bind.
+------------------------------------------------
+local keybindTitle = Instance.new("TextLabel")
+keybindTitle.Size = UDim2.new(1, -20, 0, 24)
+keybindTitle.Position = UDim2.new(0, 0, 0, 140)
+keybindTitle.Text = "Keybinds"
+keybindTitle.TextSize = 18
+keybindTitle.Font = Enum.Font.GothamBold
+keybindTitle.TextColor3 = Color3.new(1, 1, 1)
+keybindTitle.BackgroundTransparency = 1
+keybindTitle.TextXAlignment = Enum.TextXAlignment.Left
+keybindTitle.Parent = settingsContent
+
+local speedBindBtn = Instance.new("TextButton")
+speedBindBtn.Size = UDim2.new(1, -20, 0, 38)
+speedBindBtn.Position = UDim2.new(0, 0, 0, 175)
+speedBindBtn.TextSize = 15
+speedBindBtn.Font = Enum.Font.GothamBold
+speedBindBtn.TextColor3 = Color3.new(1, 1, 1)
+speedBindBtn.Parent = settingsContent
+
+styleButton(speedBindBtn)
+
+local flyBindBtn = Instance.new("TextButton")
+flyBindBtn.Size = UDim2.new(1, -20, 0, 38)
+flyBindBtn.Position = UDim2.new(0, 0, 0, 220)
+flyBindBtn.TextSize = 15
+flyBindBtn.Font = Enum.Font.GothamBold
+flyBindBtn.TextColor3 = Color3.new(1, 1, 1)
+flyBindBtn.Parent = settingsContent
+
+styleButton(flyBindBtn)
+
+local espBindBtn = Instance.new("TextButton")
+espBindBtn.Size = UDim2.new(1, -20, 0, 38)
+espBindBtn.Position = UDim2.new(0, 0, 0, 265)
+espBindBtn.TextSize = 15
+espBindBtn.Font = Enum.Font.GothamBold
+espBindBtn.TextColor3 = Color3.new(1, 1, 1)
+espBindBtn.Parent = settingsContent
+
+styleButton(espBindBtn)
+
+------------------------------------------------
+-- ESP SETTINGS
+-- Range and RGB color are independent from the ESP on/off button.
+------------------------------------------------
+local espRangeLabel = Instance.new("TextLabel")
+espRangeLabel.Size = UDim2.new(1, -150, 0, 25)
+espRangeLabel.Position = UDim2.new(0, 0, 0, 325)
+espRangeLabel.Text = "ESP Range: " .. espRange
+espRangeLabel.TextSize = 16
+espRangeLabel.Font = Enum.Font.GothamBold
+espRangeLabel.TextColor3 = Color3.new(1, 1, 1)
+espRangeLabel.BackgroundTransparency = 1
+espRangeLabel.TextXAlignment = Enum.TextXAlignment.Left
+espRangeLabel.Parent = settingsContent
+
+local espRangeBox = Instance.new("TextBox")
+espRangeBox.Size = UDim2.new(0, 120, 0, 32)
+espRangeBox.Position = UDim2.new(1, -140, 0, 320)
+espRangeBox.Text = tostring(espRange)
+espRangeBox.PlaceholderText = "Range"
+espRangeBox.TextSize = 15
+espRangeBox.Font = Enum.Font.GothamBold
+espRangeBox.TextColor3 = Color3.new(1, 1, 1)
+espRangeBox.BackgroundColor3 = Color3.fromRGB(35, 38, 50)
+espRangeBox.ClearTextOnFocus = false
+espRangeBox.Parent = settingsContent
+Instance.new("UICorner", espRangeBox).CornerRadius = UDim.new(0, 8)
+
+local espColorLabel = Instance.new("TextLabel")
+espColorLabel.Size = UDim2.new(1, -20, 0, 25)
+espColorLabel.Position = UDim2.new(0, 0, 0, 370)
+espColorLabel.Text = "ESP Color (RGB)"
+espColorLabel.TextSize = 16
+espColorLabel.Font = Enum.Font.GothamBold
+espColorLabel.TextColor3 = Color3.new(1, 1, 1)
+espColorLabel.BackgroundTransparency = 1
+espColorLabel.TextXAlignment = Enum.TextXAlignment.Left
+espColorLabel.Parent = settingsContent
+
+local function createColorBox(x, value)
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0, 100, 0, 32)
+    box.Position = UDim2.new(0, x, 0, 400)
+    box.Text = tostring(value)
+    box.TextSize = 15
+    box.Font = Enum.Font.GothamBold
+    box.TextColor3 = Color3.new(1, 1, 1)
+    box.BackgroundColor3 = Color3.fromRGB(35, 38, 50)
+    box.ClearTextOnFocus = false
+    box.Parent = settingsContent
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 8)
+    return box
+end
+
+local espRedBox = createColorBox(0, 255)
+local espGreenBox = createColorBox(110, 80)
+local espBlueBox = createColorBox(220, 80)
+
+local resetSettingsBtn = Instance.new("TextButton")
+resetSettingsBtn.Size = UDim2.new(1, -20, 0, 42)
+resetSettingsBtn.Position = UDim2.new(0, 0, 0, 450)
+resetSettingsBtn.Text = "Reset Settings to Default"
+resetSettingsBtn.TextSize = 16
+resetSettingsBtn.Font = Enum.Font.GothamBold
+resetSettingsBtn.TextColor3 = Color3.new(1, 1, 1)
+resetSettingsBtn.Parent = settingsContent
+styleButton(resetSettingsBtn)
+
+local keybindButtons = {
+    Speed = speedBindBtn,
+    Fly = flyBindBtn,
+    ESP = espBindBtn
+}
+
+local function updateKeybindButtons()
+    for action, button in pairs(keybindButtons) do
+        if bindingAction == action then
+            button.Text = action .. " Key: Press a key or Backspace for None"
+        else
+            local keybind = keybinds[action]
+            button.Text = action .. " Key: " .. (keybind and keybind.Name or "None")
+        end
+    end
+end
+
+styleButton(mainTabBtn)
+styleButton(settingsTabBtn)
+
+local function updateTabs()
+    content.Visible = currentTab == "Main"
+    settingsContent.Visible = currentTab == "Settings"
+
+    mainTabBtn.BackgroundColor3 = currentTab == "Main"
+        and Color3.fromRGB(70, 75, 105)
+        or Color3.fromRGB(35, 38, 50)
+
+    settingsTabBtn.BackgroundColor3 = currentTab == "Settings"
+        and Color3.fromRGB(70, 75, 105)
+        or Color3.fromRGB(35, 38, 50)
+end
+
+mainTabBtn.MouseButton1Click:Connect(function()
+    currentTab = "Main"
+    updateTabs()
+end)
+
+settingsTabBtn.MouseButton1Click:Connect(function()
+    currentTab = "Settings"
+    updateTabs()
+end)
+
+mainTabBtn.MouseLeave:Connect(updateTabs)
+settingsTabBtn.MouseLeave:Connect(updateTabs)
+
+local function beginKeybindChange(action)
+    bindingAction = action
+    updateKeybindButtons()
+end
+
+speedBindBtn.MouseButton1Click:Connect(function()
+    beginKeybindChange("Speed")
+end)
+
+flyBindBtn.MouseButton1Click:Connect(function()
+    beginKeybindChange("Fly")
+end)
+
+espBindBtn.MouseButton1Click:Connect(function()
+    beginKeybindChange("ESP")
+end)
+
+------------------------------------------------
+-- SLIDER LOGIC
+-- Updates the speed when the slider is clicked or dragged.
+------------------------------------------------
+function updateSpeedSlider()
+    local rel = 0
+
+    if MAX_SPEED_BONUS > 0 then
+        rel = math.clamp((speed - baseSpeed) / MAX_SPEED_BONUS, 0, 1)
+    end
+
+    fill.Size = UDim2.new(rel, 0, 1, 0)
+    label.Text = "Speed: " .. speed
+end
+
+local function updateFlySpeedSlider()
+    local maxSpeed = baseSpeed + MAX_SPEED_BONUS
+    local rel = 0
+
+    if maxSpeed > FLY_MIN_SPEED then
+        rel = math.clamp((flySpeed - FLY_MIN_SPEED) / (maxSpeed - FLY_MIN_SPEED), 0, 1)
+    end
+
+    flyFill.Size = UDim2.new(rel, 0, 1, 0)
+    flySpeedLabel.Text = "Fly Speed: " .. flySpeed
+end
+
+local function setSpeed(x)
+    local rel = math.clamp(
+        (x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X,
+        0,
+        1
+    )
+
+    speed = math.floor(baseSpeed + rel * MAX_SPEED_BONUS)
+    hasCustomSpeed = true
+    updateSpeedSlider()
+
+    applySpeed()
+end
+
+local function setFlySpeed(x)
+    local maxSpeed = baseSpeed + MAX_SPEED_BONUS
+    local rel = math.clamp(
+        (x - flyBar.AbsolutePosition.X) / flyBar.AbsoluteSize.X,
+        0,
+        1
+    )
+
+    flySpeed = math.floor(FLY_MIN_SPEED + rel * (maxSpeed - FLY_MIN_SPEED))
+    updateFlySpeedSlider()
+end
+
+local function setMaxSpeed(x)
+    local rel = math.clamp(
+        (x - maxBar.AbsolutePosition.X) / maxBar.AbsoluteSize.X,
+        0,
+        1
+    )
+
+    local maxSpeed = math.floor(baseSpeed + rel * (MAX_ALLOWED_SPEED - baseSpeed))
+    MAX_SPEED_BONUS = maxSpeed - baseSpeed
+    maxFill.Size = UDim2.new(rel, 0, 1, 0)
+    maxSpeedLabel.Text = "Max Speed: " .. maxSpeed
+    maxSpeedBox.Text = tostring(maxSpeed)
+
+    if speed > maxSpeed then
+        speed = maxSpeed
+    end
+
+    if flySpeed > maxSpeed then
+        flySpeed = maxSpeed
+    end
+
+    updateSpeedSlider()
+    updateFlySpeedSlider()
+    applySpeed()
+end
+
+function setMaxSpeedValue(value)
+    local maxSpeed = math.floor(value)
+    local rel = math.clamp(
+        (maxSpeed - baseSpeed) / (MAX_ALLOWED_SPEED - baseSpeed),
+        0,
+        1
+    )
+
+    MAX_SPEED_BONUS = maxSpeed - baseSpeed
+    maxFill.Size = UDim2.new(rel, 0, 1, 0)
+    maxSpeedLabel.Text = "Max Speed: " .. maxSpeed
+    maxSpeedBox.Text = tostring(maxSpeed)
+
+    if speed > maxSpeed then
+        speed = maxSpeed
+    end
+
+    if flySpeed > maxSpeed then
+        flySpeed = maxSpeed
+    end
+
+    updateSpeedSlider()
+    updateFlySpeedSlider()
+    applySpeed()
+end
+
+bar.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        setSpeed(i.Position.X)
+    end
+end)
+
+UIS.InputChanged:Connect(function(i)
+    if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+        setSpeed(i.Position.X)
+    elseif draggingMax and i.UserInputType == Enum.UserInputType.MouseMovement then
+        setMaxSpeed(i.Position.X)
+    elseif draggingFly and i.UserInputType == Enum.UserInputType.MouseMovement then
+        setFlySpeed(i.Position.X)
+    end
+end)
+
+UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = false
+        draggingMax = false
+        draggingFly = false
+    end
+end)
+
+maxBar.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then
+        draggingMax = true
+        setMaxSpeed(i.Position.X)
+    end
+end)
+
+flyBar.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then
+        draggingFly = true
+        setFlySpeed(i.Position.X)
+    end
+end)
+
+maxSpeedBox.FocusLost:Connect(function()
+    local typedSpeed = tonumber(maxSpeedBox.Text)
+
+    if typedSpeed then
+        setMaxSpeedValue(typedSpeed)
+    else
+        maxSpeedBox.Text = tostring(baseSpeed + MAX_SPEED_BONUS)
+    end
+end)
+
+------------------------------------------------
+-- SPEED TOGGLE LOGIC
+-- Updates the button text and applies the chosen speed.
+------------------------------------------------
+local function updateToggle()
+    toggleBtn.Text = "Speed: " .. (enabled and "ON" or "OFF")
+    applySpeed()
+end
+
+local function toggleSpeed()
+    enabled = not enabled
+    updateToggle()
+end
+
+toggleBtn.MouseButton1Click:Connect(function()
+    toggleSpeed()
+end)
+
+------------------------------------------------
+-- FLY FUNCTIONS
+-- Creates, protects, or removes the BodyVelocity and BodyGyro used for fly.
+------------------------------------------------
+local function ensureFlyParts()
+    if not flying then return false end
+
+    local char = player.Character
+    if not char then return false end
+
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    local hum = char:FindFirstChildOfClass("Humanoid")
+
+    if not hrp or not hum then return false end
+
+    if not hum.PlatformStand then
+        hum.PlatformStand = true
+    end
+
+    if not vel or vel.Parent ~= hrp then
+        if vel then
+            vel:Destroy()
+        end
+
+        vel = Instance.new("BodyVelocity")
+        vel.Name = "ProtectedFlyVelocity"
+        vel.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+        vel.Parent = hrp
+    end
+
+    if not gyro or gyro.Parent ~= hrp then
+        if gyro then
+            gyro:Destroy()
+        end
+
+        gyro = Instance.new("BodyGyro")
+        gyro.Name = "ProtectedFlyGyro"
+        gyro.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+        gyro.Parent = hrp
+    end
+
+    return true
+end
+
+local function stopFly()
+    flying = false
+
+    if flyConn then
+        flyConn:Disconnect()
+        flyConn = nil
+    end
+
+    if flyWatchConn then
+        flyWatchConn:Disconnect()
+        flyWatchConn = nil
+    end
+
+    if vel then
+        vel:Destroy()
+        vel = nil
+    end
+
+    if gyro then
+        gyro:Destroy()
+        gyro = nil
+    end
+
+    local hum = getHumanoid()
+    if hum then
+        hum.PlatformStand = false
+    end
+end
+
+local function startFly()
+    flying = true
+
+    if not ensureFlyParts() then
+        flying = false
+        return false
+    end
+
+    if flyWatchConn then
+        flyWatchConn:Disconnect()
+    end
+
+    flyWatchConn = RunService.Heartbeat:Connect(function()
+        ensureFlyParts()
+    end)
+
+    if flyConn then
+        flyConn:Disconnect()
+    end
+
+    flyConn = RunService.RenderStepped:Connect(function()
+        if not flying then return end
+        if not ensureFlyParts() then return end
+
+        local cam = workspace.CurrentCamera
+        local dir = Vector3.zero
+
+        if UIS:IsKeyDown(Enum.KeyCode.W) then
+            dir += cam.CFrame.LookVector
+        end
+
+        if UIS:IsKeyDown(Enum.KeyCode.S) then
+            dir -= cam.CFrame.LookVector
+        end
+
+        if UIS:IsKeyDown(Enum.KeyCode.A) then
+            dir -= cam.CFrame.RightVector
+        end
+
+        if UIS:IsKeyDown(Enum.KeyCode.D) then
+            dir += cam.CFrame.RightVector
+        end
+
+        if UIS:IsKeyDown(Enum.KeyCode.Space) then
+            dir += Vector3.new(0, 1, 0)
+        end
+
+        if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then
+            dir -= Vector3.new(0, 1, 0)
+        end
+
+        vel.Velocity =
+            dir.Magnitude > 0
+            and dir.Unit * flySpeed
+            or Vector3.zero
+
+        gyro.CFrame = cam.CFrame
+    end)
+
+    return true
+end
+
+------------------------------------------------
+-- FLY TOGGLE LOGIC
+-- Click the fly button to start or stop flying.
+------------------------------------------------
+local function updateFlyButton()
+    flyBtn.Text = "Fly: " .. (flying and "ON" or "OFF")
+end
+
+local function toggleFly()
+    if flying then
+        stopFly()
+    else
+        startFly()
+    end
+
+    updateFlyButton()
+end
+
+flyBtn.MouseButton1Click:Connect(function()
+    toggleFly()
+end)
+
+------------------------------------------------
+-- ESP FUNCTIONS
+-- Adds highlights to other players so they are visible through walls.
+------------------------------------------------
+local function removeESPFromPlayer(targetPlayer)
+    local highlight = espHighlights[targetPlayer]
+    if highlight then
+        highlight:Destroy()
+        espHighlights[targetPlayer] = nil
+    end
+end
+
+local function isPlayerInESPRange(targetPlayer)
+    -- A range of 0 means unlimited distance.
+    if espRange <= 0 then return true end
+
+    local ownChar = player.Character
+    local targetChar = targetPlayer.Character
+    local ownRoot = ownChar and ownChar:FindFirstChild("HumanoidRootPart")
+    local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
+
+    if not ownRoot or not targetRoot then return false end
+
+    return (ownRoot.Position - targetRoot.Position).Magnitude <= espRange
+end
+
+local function addESPToPlayer(targetPlayer)
+    if targetPlayer == player then return end
+    if not espEnabled then return end
+    if teamCheckEnabled and player.Team ~= nil and targetPlayer.Team == player.Team then return end
+
+    if not isPlayerInESPRange(targetPlayer) then
+        removeESPFromPlayer(targetPlayer)
+        return
+    end
+
+    local char = targetPlayer.Character
+    if not char then return end
+
+    local existing = espHighlights[targetPlayer]
+    if existing and existing.Parent == char then
+        existing.FillColor = espColor
+        return
+    end
+
+    removeESPFromPlayer(targetPlayer)
+
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "PlayerESP"
+    highlight.Adornee = char
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillColor = espColor
+    highlight.FillTransparency = 0.75
+    highlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+    highlight.OutlineTransparency = 0
+    highlight.Parent = char
+
+    espHighlights[targetPlayer] = highlight
+end
+
+local function disconnectESPConnections()
+    for _, conn in ipairs(espConnections) do
+        conn:Disconnect()
+    end
+
+    table.clear(espConnections)
+end
+
+local function stopESP()
+    espEnabled = false
+    espBtn.Text = "ESP: OFF"
+
+    disconnectESPConnections()
+
+    for targetPlayer in pairs(espHighlights) do
+        removeESPFromPlayer(targetPlayer)
+    end
+end
+
+local function startESP()
+    espEnabled = true
+    espBtn.Text = "ESP: ON"
+
+    disconnectESPConnections()
+
+    for _, targetPlayer in ipairs(Players:GetPlayers()) do
+        addESPToPlayer(targetPlayer)
+
+        table.insert(espConnections, targetPlayer.CharacterAdded:Connect(function()
+            task.wait(0.5)
+            addESPToPlayer(targetPlayer)
+        end))
+
+        table.insert(espConnections, targetPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+            task.defer(function()
+                if espEnabled then
+                    stopESP()
+                    startESP()
+                end
+            end)
+        end))
+    end
+
+    table.insert(espConnections, Players.PlayerAdded:Connect(function(targetPlayer)
+        table.insert(espConnections, targetPlayer.CharacterAdded:Connect(function()
+            task.wait(0.5)
+            addESPToPlayer(targetPlayer)
+        end))
+
+        table.insert(espConnections, targetPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+            task.defer(function()
+                if espEnabled then
+                    stopESP()
+                    startESP()
+                end
+            end)
+        end))
+    end))
+
+    table.insert(espConnections, Players.PlayerRemoving:Connect(function(targetPlayer)
+        removeESPFromPlayer(targetPlayer)
+    end))
+
+    table.insert(espConnections, RunService.Heartbeat:Connect(function()
+        for _, targetPlayer in ipairs(Players:GetPlayers()) do
+            addESPToPlayer(targetPlayer)
+        end
+    end))
+end
+
+local function refreshESP()
+    if not espEnabled then return end
+
+    stopESP()
+    startESP()
+end
+
+local function updateTeamCheckButton()
+    teamCheckBtn.Text = "Team Check: " .. (teamCheckEnabled and "ON" or "OFF")
+end
+
+teamCheckBtn.MouseButton1Click:Connect(function()
+    teamCheckEnabled = not teamCheckEnabled
+    updateTeamCheckButton()
+    refreshESP()
+end)
+
+local function updateESPColorFromBoxes()
+    local red = tonumber(espRedBox.Text)
+    local green = tonumber(espGreenBox.Text)
+    local blue = tonumber(espBlueBox.Text)
+
+    if red and green and blue then
+        espColor = Color3.fromRGB(
+            math.clamp(math.floor(red), 0, 255),
+            math.clamp(math.floor(green), 0, 255),
+            math.clamp(math.floor(blue), 0, 255)
+        )
+        espRedBox.Text = tostring(math.floor(espColor.R * 255 + 0.5))
+        espGreenBox.Text = tostring(math.floor(espColor.G * 255 + 0.5))
+        espBlueBox.Text = tostring(math.floor(espColor.B * 255 + 0.5))
+        refreshESP()
+    else
+        espRedBox.Text = tostring(math.floor(espColor.R * 255 + 0.5))
+        espGreenBox.Text = tostring(math.floor(espColor.G * 255 + 0.5))
+        espBlueBox.Text = tostring(math.floor(espColor.B * 255 + 0.5))
+    end
+end
+
+espRangeBox.FocusLost:Connect(function()
+    local value = tonumber(espRangeBox.Text)
+
+    if value then
+        espRange = math.max(0, math.floor(value))
+    end
+
+    espRangeBox.Text = tostring(espRange)
+    espRangeLabel.Text = "ESP Range: " .. espRange
+    refreshESP()
+end)
+
+espRedBox.FocusLost:Connect(updateESPColorFromBoxes)
+espGreenBox.FocusLost:Connect(updateESPColorFromBoxes)
+espBlueBox.FocusLost:Connect(updateESPColorFromBoxes)
+
+resetSettingsBtn.MouseButton1Click:Connect(function()
+    teamCheckEnabled = false
+    espRange = DEFAULT_ESP_RANGE
+    espColor = DEFAULT_ESP_COLOR
+    keybinds.Speed = Enum.KeyCode.T
+    keybinds.Fly = Enum.KeyCode.F
+    keybinds.ESP = Enum.KeyCode.G
+    hasCustomSpeed = false
+    speed = baseSpeed
+    flySpeed = 20
+    setMaxSpeedValue(baseSpeed + DEFAULT_MAX_SPEED_BONUS)
+
+    espRangeBox.Text = tostring(espRange)
+    espRangeLabel.Text = "ESP Range: " .. espRange
+    espRedBox.Text = "255"
+    espGreenBox.Text = "80"
+    espBlueBox.Text = "80"
+    updateTeamCheckButton()
+    updateKeybindButtons()
+    updateSpeedSlider()
+    updateFlySpeedSlider()
+    refreshESP()
+end)
+
+------------------------------------------------
+-- ESP TOGGLE LOGIC
+-- Click the ESP button to show or hide player outlines.
+------------------------------------------------
+local function toggleESP()
+    if espEnabled then
+        stopESP()
+    else
+        startESP()
+    end
+end
+
+espBtn.MouseButton1Click:Connect(function()
+    toggleESP()
+end)
+
+------------------------------------------------
+-- KEYBINDS
+-- Press the configured keys to toggle speed, fly, and ESP.
+------------------------------------------------
+UIS.InputBegan:Connect(function(i, gpe)
+    if gpe then return end
+    if i.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+    if bindingAction then
+        if i.KeyCode == Enum.KeyCode.Backspace
+            or i.KeyCode == Enum.KeyCode.Delete
+            or i.KeyCode == Enum.KeyCode.Escape then
+            keybinds[bindingAction] = nil
+        elseif i.KeyCode ~= Enum.KeyCode.Unknown then
+            keybinds[bindingAction] = i.KeyCode
+        end
+
+        bindingAction = nil
+        updateKeybindButtons()
+        return
+    end
+
+    if keybinds.Speed and i.KeyCode == keybinds.Speed then
+        toggleSpeed()
+    elseif keybinds.Fly and i.KeyCode == keybinds.Fly then
+        toggleFly()
+    elseif keybinds.ESP and i.KeyCode == keybinds.ESP then
+        toggleESP()
+    end
+end)
+
+------------------------------------------------
+-- CLOSE BUTTON
+-- Cleans up speed/fly connections, resets speed, and removes the GUI.
+------------------------------------------------
+local close = Instance.new("TextButton")
+close.Size = UDim2.new(0, 30, 0, 25)
+close.Position = UDim2.new(1, -35, 0.5, -12)
+close.Text = "X"
+close.TextSize = 16
+close.BackgroundColor3 = Color3.fromRGB(120, 48, 56)
+close.TextColor3 = Color3.new(1, 1, 1)
+close.Font = Enum.Font.GothamBold
+close.Active = true
+close.AutoButtonColor = true
+close.ZIndex = 100
+close.Parent = top
+
+Instance.new("UICorner", close).CornerRadius = UDim.new(0, 6)
+
+local closeStroke = Instance.new("UIStroke")
+closeStroke.Color = Color3.fromRGB(170, 75, 85)
+closeStroke.Transparency = 0.35
+closeStroke.Thickness = 1
+closeStroke.Parent = close
+
+close.MouseButton1Click:Connect(function()
+    enabled = false
+    stopFly()
+    stopESP()
+    applySpeed()
+
+    if speedConn then speedConn:Disconnect() end
+    if walkSpeedConn then walkSpeedConn:Disconnect() end
+    if charConn then charConn:Disconnect() end
+
+    gui:Destroy()
+end)
+
+------------------------------------------------
+-- MINIMIZE BUTTON
+-- Hides the main menu and creates a small restore button.
+------------------------------------------------
+local mini = Instance.new("TextButton")
+mini.Size = UDim2.new(0, 30, 0, 25)
+mini.Position = UDim2.new(1, -70, 0.5, -12)
+mini.Text = "-"
+mini.TextSize = 18
+mini.Font = Enum.Font.GothamBold
+mini.BackgroundColor3 = Color3.fromRGB(48, 52, 68)
+mini.TextColor3 = Color3.new(1, 1, 1)
+mini.Parent = top
+
+Instance.new("UICorner", mini).CornerRadius = UDim.new(0, 6)
+
+local miniStroke = Instance.new("UIStroke")
+miniStroke.Color = Color3.fromRGB(85, 90, 115)
+miniStroke.Transparency = 0.35
+miniStroke.Thickness = 1
+miniStroke.Parent = mini
+
+local restoreBtn
+
+local function createRestore()
+    if restoreBtn then return end
+
+    restoreBtn = Instance.new("TextButton")
+    restoreBtn.Size = UDim2.new(0, 140, 0, 35)
+    restoreBtn.Position = UDim2.new(0, 20, 0, 20)
+    restoreBtn.Text = "Open Menu"
+    restoreBtn.TextColor3 = Color3.new(1, 1, 1)
+    restoreBtn.Font = Enum.Font.GothamBold
+    restoreBtn.TextSize = 15
+    restoreBtn.Parent = gui
+
+    styleButton(restoreBtn)
+
+    restoreBtn.MouseButton1Click:Connect(function()
+        minimized = false
+        main.Visible = true
+        restoreBtn:Destroy()
+        restoreBtn = nil
+    end)
+end
+
+mini.MouseButton1Click:Connect(function()
+    minimized = true
+    main.Visible = false
+    createRestore()
+end)
+
+------------------------------------------------
+-- MENU DRAGGING
+-- Drag the top bar to move the whole menu.
+------------------------------------------------
+local dragStart
+local startPos
+
+top.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then
+        draggingUI = true
+        dragStart = i.Position
+        startPos = main.Position
+    end
+end)
+
+UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then
+        draggingUI = false
+    end
+end)
+
+UIS.InputChanged:Connect(function(i)
+    if draggingUI and i.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = i.Position - dragStart
+
+        main.Position = UDim2.new(
+            startPos.X.Scale,
+            startPos.X.Offset + delta.X,
+            startPos.Y.Scale,
+            startPos.Y.Offset + delta.Y
+        )
+    end
+end)
+
+------------------------------------------------
+-- STARTUP
+-- Begin watching speed after everything is created.
+------------------------------------------------
+local initialHumanoid = getHumanoid()
+if initialHumanoid then
+    baseSpeed = initialHumanoid.WalkSpeed
+    speed = baseSpeed
+end
+
+updateToggle()
+updateFlyButton()
+updateTabs()
+updateTeamCheckButton()
+setMaxSpeedValue(baseSpeed + MAX_SPEED_BONUS)
+updateSpeedSlider()
+updateFlySpeedSlider()
+updateKeybindButtons()
+startSpeedWatchdog()
